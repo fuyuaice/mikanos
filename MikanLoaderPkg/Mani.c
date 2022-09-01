@@ -85,9 +85,12 @@ EFI_STATUS SaveMemoryMap(struct MemoryMap* map, EFI_FILE_PROTOCOL*file){
             i, desc->Type, GetMemoryTypeUnicode(desc->Type),
             desc->PhysicalStart, desc->NumberOpPages,
             desc->Attribute & 0xfffflu);
-        file->Write(file, &len,buf);
+        status = file->Write(file, &len,buf);
+        if(EFI_ERROR(status)){
+            return status;
         }
-    
+    }
+
     return EFI_SUCCESS;
 }
 // #@@range_end(save_memory_map)
@@ -96,13 +99,27 @@ EFI_STATUS OpenRootDir(EFI_HANDLE image_handle, EFI_FILE_PROTOCOL**root){
     EFI_LOADED_IMAGE_PROTOCOL* loaded_image;
     EFI_SIMPLE_FILE_SYSTEM_PROTOCOL* fs;
 
-    gBS->OpenProtocol(
+    status = gBS->OpenProtocol(
         image_handle,
         &gEfiLoadedImageProtocolGuid,
         (VOID**)&loaded_image,
         image_handle,
         NULL,
         EFI_OPEN_PROTOCOL_BY_HANDLE_PROTOCOL);
+    if(EFI_ERROR(status)){
+        return status;
+    }
+
+    status = gBS->OpenProtocol(
+        loaded_image->DeviceHandle,
+        &gEfiSimpleFileSystemProtocolGuid,
+        (VOID**)&fs,
+        image_handle,
+        NULL,
+        EFI_OPEN_PROTOCOL_BY_HANDLE_PROTOCOL);
+    if(EFI_ERROR(status)){
+        return status;
+    }
 
     fs->OpenVolume(fs, root);
 
@@ -113,22 +130,28 @@ EFI_STATUS OpneGOP(EFI_HANDLE image_handle,
                    EFI_GRAPHICS_OUTPUT_PROTOCOL** gop){
     UINTN num_gop_handles = 0;
     EFI_HANDLE* gop_handles = NULL;
-    gBS->LocateHandleBuffer(
+    status = gBS->LocateHandleBuffer(
         ByProtocol,
         &gEfiGraphicsOutputProtocolGuid,
         NULL,
         &num_gop_handles,
         &gop_handles);
+    if(EFI_ERROR(status)){
+        return status;
+    }
 
-    gBS->OpenProtocol(
+    status = gBS->OpenProtocol(
         gop_handles[0],
         &EfiGraphicsOutputProtocolGuid,
         (VOID**)gop,
         image_handle,
         NULL,
         EFI_OPEN_PROTOCOL_BY_HANDLE_PROTOCOL);
+    if(EFI_ERROR(status)){
+        return status;
+    }
 
-    RreePool(gop_handles);
+    FreePool(gop_handles);
 
     return EFI_SUCCESS;
 }
@@ -150,6 +173,12 @@ const CHAR16* GetPixelFormatUnicode(EFI_GRAPHICS_PIXEL_FORMAT fmt){
     }
 }
 
+// #@@range_begin(halt)
+void Halt(void){
+    while(1) __asm__("hlt");
+}
+// #@@range_end(halt)
+
 EFI_STATUS EFIAPI UefiMain(
     EFI_HANDLE image_handle,
     EFI_SYSTEM_TABLE *system_table){
@@ -158,24 +187,50 @@ EFI_STATUS EFIAPI UefiMain(
         // #@@range_begin(main)
         CHAR8 memmap_buf[4096*4];
         struct MemoryMap memmap = {sizeof(memmap_buf), memmap_buf, 0,0, 0, 0};
-        GetMemoryMap(&memmap);
+        status = GetMemoryMap(&memmap);
+        if(EFI_ERROR(status)){
+            Print(L"failed to get memoryu map: %r\n",status);
+            Halt();
+        }
 
         EFI_FILE_PROTOCOL* root_dir;
-        OpenRootDir(image_handle, &root_dir);
+        status = OpenRootDir(image_handle, &root_dir);
+        if(EFI_ERROR(status)){
+            Print(L"failed to open root directory: %r\n", status);
+            Halt();
+        }
 
         EFI_FILE_PROTOCOL* memmap_file;
         root_dir->Open(
             root_dir, &memmap_file, l"\\memmap",
             EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE |
             EFI_FILE_MODE_CREATE, 0);
-
-        SaveMemoryMap(&memmap, memmap_file);
-        memmap_file->Close(memmap_file);
+        if(EFI_ERROR(status)){
+            Print(L"failed to open file '\\memmap': %r\n", status);
+            Print(L"Ignored.\n");
+        }
+        else{
+            status = SaveMemoryMap(&memmap, memmap_file);
+            if(EFI_ERROR(status)){
+                Print(L"failed to save memory map: %r\n", status);
+                Halt();
+            }
+            status = memmap_file->Close(memmap_file);
+            if(EFI_ERROR(status)){
+                Print(L"failed to close memory map: %r\n", status);
+                Halt();
+            }
+        }
         // #@@range_end(main)
 
         // #@@range_begin(gop)
         EFI_GRAPHICS_OUTPUT_PROTOCOL* gop;
-        OpneGOP(image_handle, &gop);
+        status = OpneGOP(image_handle, &gop);
+        if(EFI_ERROR(status)){
+            Print(L"failed to open GOP: %r\n", status);
+            Halt();
+        }
+
         Print(L"Resolution: %ux%u, Pixel Format: %s, %u pixels/line\n",
             gop->Mode->Info->HorizontalResolution,
             gop->Mode->Info->VerticalResolution,
@@ -194,24 +249,43 @@ EFI_STATUS EFIAPI UefiMain(
         
         // #@@range_begin(read_kernel)
         EFI_FILE_PROTOCOL* kernel_file;
-        root_dir->Open(
+        status = root_dir->Open(
             root_dir, &kernel_file, L"\\kernel.elf",
             EFI_FILE_MODE_READ, 0);
+        if(EFI_ERROR(status)){
+            Print(L"failed to open file '\\kernel.elf': %r\n", status);
+            Halt();
+        }
 
         UINTN file_info_size = sizeof(EFI_FILE_INFO) + sizeof(CHAR16) * 12;
         UINT8 file_info_buffer[file_info_size];
-        kernel_file->GetInfo(
+        status = kernel_file->GetInfo(
             kernel_file, &gEfiFileInfoGuid,
             &file_info_size, file_info_buffer);
+        if(EFI_ERROR(status)){
+            Print(L"failed to get file information: %r\n", status);
+            Halt();
+        }
 
         EFI_FILE_INFO* file_info = (EFI_FILE_INFO*)file_info_buffer;
         UINTN kernel_file_size = file_info->FileSize;
 
+        // #@@range_begin(alloc_error)
         EFI_PHYSICAL_ADDRESS kernel_base_addr = 0x100000;
-        gBS->AllocatePages(
+        status = gBS->AllocatePages(
             AllocateAddress, EfiLoaderData,
             (kernel_file_size + 0xfff) / 0x1000, &kernel_base_addr);
-        kernel_file->Read(kernel_file, &kernel_file_size, (VOID*)kernel_base_addr);
+        if(EFI_ERROR(status)){
+            Print(L"failed to allocate pages: %r\n", status);
+            Halt();
+        }
+        // #@@range_end(alloc_error)
+
+        status = kernel_file->Read(kernel_file, &kernel_file_size, (VOID*)kernel_base_addr);
+        if(EFI_ERROR(status)){
+            Print(L"error: %r\n", status);
+            Halt();
+        }
         Print(L"Kernel: 0x%01x (%lu bytes)\n", kernel_base_addr, kernel_file_size);
         // #@@range_end(read_kernel)
 
