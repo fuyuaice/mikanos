@@ -2,9 +2,12 @@
 #include <Library/UefiLib.h>
 #include <Library/UefiBootServicesTable.h>
 #include <Library/PrintLib.h>
+#include <Library/MemoryAllocationLib.h>
 #include <Protocols/LoadedImage.h>
 #include <Protocol/SimpleFileSystem.h>
+#include <Protocols/DiskInz.h>
 #include <Protocol/BlockIo.h>
+#include <Guid/FileInfo.h>
 
 // #@@range_begin(struct_memory_map)
 struct MemoryMap{
@@ -232,9 +235,9 @@ EFI_STATUS EFIAPI UefiMain(
         // #@@range_begin(call_kernel)
         UINT64 entry_addr = *(UINT64*)(kernel_base_addr + 24);
 
-        typedef void EntryPointType(void);
+        typedef void EntryPointType(UINT64, UINT64);
         EntryPointType* entry_point = (EntryPointType*)entry_addr;
-        entry_point();
+        entry_point(gop->Mode->FrameBufferBase, gop->Mode->FrameBufferSize);
         // #@@range_end(call_kernel)
 
         Print(L"All done\n");
